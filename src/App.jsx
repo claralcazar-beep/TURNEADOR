@@ -102,6 +102,7 @@ export default function App() {
   const [verCompartir, setVerCompartir] = useState(false);
   const [msgCopiado, setMsgCopiado] = useState("");
   const [salvInput, setSalvInput] = useState({});
+  const [rango, setRango] = useState({ d: "", h: "" });
   const listoParaGuardar = useRef(false);
 
   const festivos = useMemo(() => festivosColombia(anio), [anio]);
@@ -212,11 +213,62 @@ export default function App() {
     for (let d = 1; d <= nDias; d++) if ((noDisp[mkKey(anio, mes, d)] || {})[id]) arr.push(d);
     return arr;
   };
-  const agregarSalvedad = (id) => {
-    const d = parseInt(salvInput[id] || "", 10);
-    if (!d || d < 1 || d > nDias) return;
-    toggleNoDisp(id, d);
+  const agregarSalvedad = async (id) => {
+    const txt = (salvInput[id] || "").trim();
+    const m = txt.match(/^(\d{1,2})\s*(?:-|al|a)\s*(\d{1,2})$/i);
+    if (m) {
+      await bloquearRango(id, parseInt(m[1], 10), parseInt(m[2], 10));
+    } else {
+      const d = parseInt(txt, 10);
+      if (!d || d < 1 || d > nDias) return;
+      toggleNoDisp(id, d);
+    }
     setSalvInput((p) => ({ ...p, [id]: "" }));
+  };
+
+  /* ---------- aplicar a un rango de días ---------- */
+  const diasDeRango = (d1, d2) => {
+    let a = Math.max(1, Math.min(d1, d2)), b = Math.min(nDias, Math.max(d1, d2));
+    const keys = [];
+    for (let d = a; d <= b; d++) keys.push(mkKey(anio, mes, d));
+    return keys;
+  };
+  const bloquearRango = async (id, d1, d2) => {
+    const keys = diasDeRango(d1, d2);
+    if (!keys.length) return;
+    setNoDisp((p) => {
+      const n = { ...p };
+      keys.forEach((k) => { n[k] = { ...(n[k] || {}), [id]: true }; });
+      return n;
+    });
+    setSync("guardando");
+    const rows = keys.map((fecha) => ({ grupo_id: grupo.id, fecha, especialista_id: id }));
+    const { error } = await supabase.from("ct_salvedades").upsert(rows, { onConflict: "grupo_id,fecha,especialista_id" });
+    marcar(error);
+  };
+  const aplicarRango = async () => {
+    const d1 = parseInt(rango.d, 10), d2 = parseInt(rango.h, 10);
+    if (!d1 || !d2) return;
+    const keys = diasDeRango(d1, d2);
+    if (!keys.length) return;
+    if (modo === "borrar") {
+      setAsig((p) => { const n = { ...p }; keys.forEach((k) => delete n[k]); return n; });
+      setSync("guardando");
+      const { error } = await supabase.from("ct_turnos").delete().eq("grupo_id", grupo.id)
+        .gte("fecha", keys[0]).lte("fecha", keys[keys.length - 1]);
+      marcar(error);
+    } else if (!espSel) {
+      return;
+    } else if (modo === "asignar") {
+      setAsig((p) => { const n = { ...p }; keys.forEach((k) => { n[k] = selId; }); return n; });
+      setSync("guardando");
+      const rows = keys.map((fecha) => ({ grupo_id: grupo.id, fecha, especialista_id: selId }));
+      const { error } = await supabase.from("ct_turnos").upsert(rows, { onConflict: "grupo_id,fecha" });
+      marcar(error);
+    } else {
+      await bloquearRango(selId, d1, d2);
+    }
+    setRango({ d: "", h: "" });
   };
 
   /* ---------- acciones sobre días ---------- */
@@ -682,6 +734,19 @@ ${filas}
             <button onClick={() => setModo("borrar")} style={{ ...S.modoBtn, ...(modo === "borrar" ? S.modoOn : {}) }}>Borrar turno</button>
           </div>
         </div>
+        <div style={S.toolGroup}>
+          <span style={S.toolLabel}>Aplicar a varios días de una vez (usa el especialista y la acción de arriba)</span>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", fontSize: 14, fontWeight: 600 }}>
+            Del
+            <input type="number" min="1" max={nDias} placeholder="10" value={rango.d}
+              onChange={(ev) => setRango((p) => ({ ...p, d: ev.target.value }))} style={S.inputNum} />
+            al
+            <input type="number" min="1" max={nDias} placeholder="18" value={rango.h}
+              onChange={(ev) => setRango((p) => ({ ...p, h: ev.target.value }))}
+              onKeyDown={(ev) => { if (ev.key === "Enter") aplicarRango(); }} style={S.inputNum} />
+            <button onClick={aplicarRango} style={S.btnGenerar}>Aplicar</button>
+          </div>
+        </div>
       </section>
 
       {/* Salvedades */}
@@ -698,11 +763,11 @@ ${filas}
                   <span style={S.vedadoTag}> · nunca: {SEMANA.filter((s) => (e.diasVedados || []).includes(s.d)).map((s) => s.l).join(", ")}</span>
                 )}
               </span>
-              <input type="number" min="1" max={nDias} placeholder="día"
+              <input type="text" inputMode="numeric" placeholder="día o 10-18"
                 value={salvInput[e.id] || ""}
                 onChange={(ev) => setSalvInput((p) => ({ ...p, [e.id]: ev.target.value }))}
                 onKeyDown={(ev) => { if (ev.key === "Enter") agregarSalvedad(e.id); }}
-                style={S.inputNum} />
+                style={{ ...S.inputNum, width: 84 }} />
               <button onClick={() => agregarSalvedad(e.id)} style={S.miniBtnAncho}>Añadir</button>
               <div style={S.salvChips}>
                 {dias.length === 0 && <span style={S.salvVacio}>sin salvedades este mes</span>}
@@ -842,7 +907,7 @@ ${filas}
       </section>
 
       <footer style={S.footer}>
-        Festivos de Colombia calculados automáticamente (Ley Emiliani y Semana Santa). Cada especialidad tiene su propio enlace: comparte esta misma dirección con ?g={grupo ? grupo.slug : "…"} al final y esa especialidad verá solo su cuadro. Los cambios se guardan en la nube. Turneador v2.1
+        Festivos de Colombia calculados automáticamente (Ley Emiliani y Semana Santa). Cada especialidad tiene su propio enlace: comparte esta misma dirección con ?g={grupo ? grupo.slug : "…"} al final y esa especialidad verá solo su cuadro. Los cambios se guardan en la nube. Turneador v2.2
       </footer>
     </div>
   );
